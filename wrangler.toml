@@ -7,11 +7,11 @@ compatibility_flags = ["nodejs_compat"]
 keep_vars = true
 
 # 定时任务配置（UTC）
-# - 每分钟：执行离线节点、资源告警
-# - 每小时：合并执行其他定时任务（表轮换、旧表清理、按配置时区/小时触发服务器到期检测）
-# - 注意同步修改deploy和index.js scheduled函数里面的值
+# - 每小时：执行其他定时任务（表轮换、旧表清理、按配置时区/小时触发服务器到期检测）
+# - 离线节点/资源告警检测已关闭：原为每分钟执行，但需要 tg_notify 或通知渠道配置，
+#   未配置时每次都在开头 return，纯消耗 CPU（1440 次/天）
 [triggers]
-crons = ["*/1 * * * *", "0 * * * *"]
+crons = ["0 * * * *"]
 
 [assets]
 directory = "./dist"

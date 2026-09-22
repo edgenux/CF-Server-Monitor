@@ -490,18 +490,9 @@ export default {
     const hour = now.getUTCHours();
     const minute = now.getUTCMinutes();
     
-    if (cron === '*/1 * * * *') {
-      if (day === 0 && hour === 0 && minute < 5) {
-        debug('[Cron] 每周日0:00-0:05表轮换期间，跳过离线节点检测');
-      } else {
-        debug('[Cron] 开始执行离线节点检测');
-        await checkOfflineNodes(env.DB);
-        debug('[Cron] 离线节点检测完成');
-        debug('[Cron] 开始执行资源负载告警检测');
-        await checkResourceAlerts(env);
-        debug('[Cron] 资源负载告警检测完成');
-      }
-    } else if (cron === '0 * * * *') {
+    // 每分钟的离线节点/资源告警检测已关闭（CPU 超限）。
+    // 需要时可在下方恢复，且必须同步 wrangler.toml 的 crons 配置。
+    if (cron === '0 * * * *') {
       if (day === 0 && hour === 0) {
         debug('[Cron] 开始执行每周数据清理任务（表轮换）');
         await weeklyCleanup(env.DB);
