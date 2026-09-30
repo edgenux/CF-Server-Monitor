@@ -659,11 +659,10 @@ const normalizeTgNotifySetting = (value) => {
   if (value === false || value === 'false' || value === undefined || value === null || value === '') return '0'
 
   const minutes = Number(value)
-  if (Number.isInteger(minutes) && (minutes === 0 || (minutes >= 2 && minutes <= 30))) {
-    return String(minutes)
-  }
-
-  return '0'
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 30) return '0'
+  if (minutes === 0) return '0'
+  // 最小 5 分钟：低于 5 的历史值（如 2、3、4）统一提升到 5
+  return String(Math.max(minutes, 5))
 }
 
 const isTgNotifyEnabled = (value) => normalizeTgNotifySetting(value) !== '0'
@@ -946,6 +945,7 @@ const settings = ref({
   tg_notify: '0',
   expire_reminder: '0',
   resource_alert_rules: [],
+  traffic_alert_threshold: 0,
   tg_bot_token: '',
   tg_chat_id: '',
   notification_timezone: 'UTC',
@@ -1007,7 +1007,7 @@ const toggleAdminPasswordChange = () => {
 }
 
 const { visibility: passwordVisible, toggle: togglePassword } = usePasswordVisibility([
-  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'turnstileSecret', 'githubClientSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
+  'login', 'tgBotToken', 'tgChatId', 'notificationWebhookUrl', 'smtpPassword', 'turnstileSecret', 'githubClientSecret', 'cloudflareToken', 'jwtSecret', 'password', 'confirmPassword'
 ])
 
 const {
@@ -1034,6 +1034,7 @@ const editForm = ref({
   expire_date: '',
   traffic_limit: '',
   traffic_calc_type: 'total',
+  traffic_alert_percent: null,
   interface: '',
   reset_day: 1,
   collect_interval: 0,
@@ -1064,6 +1065,7 @@ const createBatchEditDefaults = () => ({
   expire_date: '',
   traffic_limit: '',
   traffic_calc_type: 'total',
+  traffic_alert_percent: null,
   interface: '',
   reset_day: 1,
   collect_interval: 0,
@@ -1454,6 +1456,7 @@ const loadSettings = async () => {
         tg_notify: normalizeTgNotifySetting(settingsData.tg_notify),
         expire_reminder: normalizeExpireReminderSetting(settingsData.expire_reminder),
         resource_alert_rules: normalizeResourceAlertRulesSetting(settingsData.resource_alert_rules),
+        traffic_alert_threshold: Number(settingsData.traffic_alert_threshold) || 0,
         tg_bot_token: settingsData.tg_bot_token || '',
         tg_chat_id: settingsData.tg_chat_id || '',
         notification_timezone: normalizeNotificationTimezoneSetting(settingsData.notification_timezone),
@@ -1630,6 +1633,10 @@ const saveSettings = async () => {
     if (!cspStaticValid || !cspApiValid) {
       return
     }
+    if (!settingsPanelRef.value.validateSmtpFields()) {
+      validationError.value = trans.value.smtpConfigInvalid || 'SMTP configuration is incomplete, please check the SMTP settings'
+      return
+    }
   }
 
   saving.value = true
@@ -1662,6 +1669,7 @@ const saveSettings = async () => {
       tg_notify: normalizeTgNotifySetting(settings.value.tg_notify),
       expire_reminder: normalizeExpireReminderSetting(settings.value.expire_reminder),
       resource_alert_rules: normalizeResourceAlertRulesSetting(settings.value.resource_alert_rules),
+      traffic_alert_threshold: String(Math.max(0, Math.min(100, Number(settings.value.traffic_alert_threshold) || 0))),
       tg_bot_token: settings.value.tg_bot_token,
       tg_chat_id: settings.value.tg_chat_id,
       notification_timezone: normalizeNotificationTimezoneSetting(settings.value.notification_timezone),
@@ -1986,6 +1994,16 @@ const getCustomInstallCommand = () => {
     const ghUrl = buildGhRawUrl(proxy, '/huilang-me/cfsm-agent/main/install.ps1')
     return `$script = "$env:TEMP\\install-cf-probe.ps1"; Invoke-WebRequest -Uri ${quotePowerShellArg(ghUrl)} -OutFile $script -UseBasicParsing; PowerShell -ExecutionPolicy Bypass -File $script ${params.join(' ')}`
   }
+  if (targetOs.value === 'docker') {
+    const safeTag = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/.test(version) ? version : 'latest'
+    const image = `ghcr.io/huilang-me/cfsm-agent:${safeTag}`
+    return [
+      'docker run -d --name cf-probe --restart=unless-stopped --network=host \\',
+      '  -v cf-probe-data:/data \\',
+      `  -e SERVER_ID=${quotePosixShellArg(copyServerId.value)} -e SECRET=${quotePosixShellArg(apiSecret.value)} -e WORKER_URL=${quotePosixShellArg(`${HOST}/update`)} \\`,
+      `  ${image}`
+    ].join('\n')
+  }
   const params = ['install']
   if (proxy) params.push(quotePosixShellArg(`--install-ghproxy=${proxy}`))
   if (version) params.push(quotePosixShellArg(`--install-version=${version}`))
@@ -2055,6 +2073,14 @@ const copyUninstallCmd = async () => {
   }, 1500)
 }
 
+// 逐台月流量告警阈值：空/未设置 → null（跟随全局）；否则夹取 0..100 整数（0 = 该服务器显式关闭）
+const normalizeTrafficAlertPercentField = (value) => {
+  if (value === '' || value === null || value === undefined) return null
+  const n = parseInt(value, 10)
+  if (!Number.isFinite(n)) return null
+  return Math.max(0, Math.min(100, n))
+}
+
 const createEditFormFromServer = (server) => ({
     id: server.id,
     name: server.name || '',
@@ -2069,6 +2095,7 @@ const createEditFormFromServer = (server) => ({
     expire_date: server.expire_date || '',
     traffic_limit: server.traffic_limit || '',
     traffic_calc_type: server.traffic_calc_type || 'total',
+    traffic_alert_percent: server.traffic_alert_percent ?? '',
     interface: server.interface || '',
     reset_day: server.reset_day ?? 1,
     collect_interval: server.collect_interval ?? 0,
@@ -2154,6 +2181,7 @@ const buildEditPayloadFromForm = (form) => {
       expire_date: normalizedExpireDate,
       traffic_limit: form.traffic_limit,
       traffic_calc_type: form.traffic_calc_type,
+      traffic_alert_percent: normalizeTrafficAlertPercentField(form.traffic_alert_percent),
       interface: form.interface,
       reset_day: form.reset_day,
       collect_interval: form.collect_interval,
@@ -2220,6 +2248,7 @@ const saveEdit = async () => {
     expire_date: normalizedExpireDate,
     traffic_limit: editForm.value.traffic_limit,
     traffic_calc_type: editForm.value.traffic_calc_type,
+    traffic_alert_percent: normalizeTrafficAlertPercentField(editForm.value.traffic_alert_percent),
     interface: editForm.value.interface,
     reset_day: editForm.value.reset_day,
     collect_interval: editForm.value.collect_interval,
@@ -2547,6 +2576,9 @@ const queryD1Usage = async () => {
 
 const sendTestNotification = async () => {
   if (testNotificationLoading.value) return
+  if (settingsPanelRef.value && !settingsPanelRef.value.validateSmtpFields()) {
+    return
+  }
   testNotificationLoading.value = true
   try {
     const result = await adminApiForSite({
